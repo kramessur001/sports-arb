@@ -1,38 +1,40 @@
 """Fetcher for Polymarket prediction market odds."""
-import asyncio
 import json
 import logging
 from datetime import datetime
 from typing import Optional
-from urllib.parse import urljoin
 
 import httpx
 
 from backend.app.config import settings
-from backend.app.models import MarketOdds, MarketType, Platform, Sport, probability_to_american, probability_to_decimal
+from backend.app.models import (
+    MarketOdds,
+    MarketType,
+    Platform,
+    Sport,
+    probability_to_american,
+    probability_to_decimal,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # Sport detection keywords for Polymarket markets
 SPORT_KEYWORDS = {
-    Sport.NFL: ["nfl", "football", "super bowl", "sb lviii", "sb lvii", "superbowl", "nfl"],
-    Sport.NBA: ["nba", "basketball", "finals", "nba championship", "mvp"],
-    Sport.MLB: ["mlb", "baseball", "world series", "world championship"],
+    Sport.NFL: ["nfl", "football", "super bowl", "sb"],
+    Sport.NBA: ["nba", "basketball", "finals", "championship"],
+    Sport.MLB: ["mlb", "baseball", "world series"],
     Sport.NHL: ["nhl", "hockey", "stanley cup"],
-    Sport.EPL: ["epl", "premier league", "english football", "soccer"],
+    Sport.EPL: ["epl", "premier league", "soccer"],
 }
 
 
-def detect_sport(title: str, description: str = "", tags: list[str] = None) -> Optional[Sport]:
-    """Detect sport from market title, description, or tags using keyword matching."""
-    if tags is None:
-        tags = []
-
-    combined_text = f"{title} {description} {' '.join(tags)}".lower()
+def detect_sport(question: str) -> Optional[Sport]:
+    """Detect sport from market question text using keyword matching."""
+    question_lower = question.lower()
 
     for sport, keywords in SPORT_KEYWORDS.items():
-        if any(keyword in combined_text for keyword in keywords):
+        if any(keyword in question_lower for keyword in keywords):
             return sport
 
     return None
@@ -44,7 +46,6 @@ class PolymarketFetcher:
     def __init__(self):
         """Initialize the Polymarket fetcher."""
         self.gamma_api_url = settings.POLYMARKET_GAMMA_API
-        self.clob_api_url = settings.POLYMARKET_CLOB_API
         self.timeout = settings.REQUEST_TIMEOUT
         self.user_agent = settings.USER_AGENT
         self._cache = {}
@@ -68,9 +69,8 @@ class PolymarketFetcher:
         self._cache[key] = data
         self._cache_times[key] = datetime.utcnow()
 
-    async def _fetch_json(self, base_url: str, endpoint: str, params: dict = None) -> Optional[dict]:
-        """Fetch JSON from Polymarket API."""
-        url = urljoin(base_url, endpoint)
+    async def _fetch_json(self, url: str, params: dict = None) -> Optional[list]:
+        """Fetch JSON from Polymarket Gamma API."""
         headers = {"User-Agent": self.user_agent}
 
         try:
@@ -91,115 +91,81 @@ class PolymarketFetcher:
             logger.error(f"Unexpected error fetching {url}: {e}")
             return None
 
-    async def _fetch_markets(self, sport: Optional[Sport] = None) -> list[dict]:
-        """Fetch markets from Polymarket Gamma API."""
-        cache_key = f"polymarket_markets_{sport}"
+    async def _fetch_all_markets(self) -> list[dict]:
+        """Fetch all sports markets from Polymarket by paginating through results."""
+        cache_key = "polymarket_all_markets"
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
 
         all_markets = []
-        offset = 0
-        limit = 100
-        max_iterations = 50  # Prevent infinite loops
+        url = f"{self.gamma_api_url}/markets"
 
-        while max_iterations > 0:
+        # Fetch 600 markets (6 pages of 100) with active and closed filters
+        for offset in range(0, 600, 100):
             params = {
+                "limit": 100,
+                "active": "true",
+                "closed": "false",
                 "offset": offset,
-                "limit": limit,
-                "active": True,  # Only active markets
             }
 
-            data = await self._fetch_json(self.gamma_api_url, "/markets", params=params)
-            if not data:
-                logger.warning("No markets data from Polymarket")
-                break
-
-            markets = data if isinstance(data, list) else data.get("data", [])
+            markets = await self._fetch_json(url, params=params)
             if not markets:
+                logger.warning(f"No markets returned at offset {offset}")
                 break
 
-            # Filter for sports if sport specified
-            if sport:
-                filtered = [m for m in markets if self._is_sports_market(m, sport)]
-                all_markets.extend(filtered)
-            else:
-                # If no sport specified, get all sports markets
-                filtered = [m for m in markets if self._is_sports_market(m, None)]
-                all_markets.extend(filtered)
-
-            offset += limit
-            max_iterations -= 1
+            all_markets.extend(markets)
+            logger.info(f"Fetched {len(markets)} markets at offset {offset}")
 
         self._set_cache(cache_key, all_markets)
         return all_markets
 
-    def _is_sports_market(self, market: dict, sport: Optional[Sport] = None) -> bool:
-        """Check if market is sports-related and optionally matches sport."""
-        title = market.get("title", "")
-        description = market.get("description", "")
-        tags = market.get("tags", [])
-
-        detected_sport = detect_sport(title, description, tags)
-
-        if sport:
-            return detected_sport == sport
-        else:
-            return detected_sport is not None
-
-    def _parse_outcome_prices(self, market: dict) -> list[float]:
-        """Parse outcome prices from market data."""
+    def _parse_outcomes(self, outcomes_json: str) -> list[str]:
+        """Parse JSON string of outcomes into list."""
         try:
-            outcome_prices_raw = market.get("outcome_prices")
-            if isinstance(outcome_prices_raw, str):
-                return json.loads(outcome_prices_raw)
-            elif isinstance(outcome_prices_raw, list):
-                return outcome_prices_raw
-            else:
-                return []
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning(f"Error parsing outcome_prices: {e}")
+            if isinstance(outcomes_json, str):
+                return json.loads(outcomes_json)
+            elif isinstance(outcomes_json, list):
+                return outcomes_json
+            return []
+        except (json.JSONDecodeError, TypeError):
             return []
 
-    def _parse_outcomes(self, market: dict) -> list[str]:
-        """Parse outcomes from market data."""
+    def _parse_prices(self, prices_json: str) -> list[str]:
+        """Parse JSON string of prices into list."""
         try:
-            outcomes_raw = market.get("outcomes")
-            if isinstance(outcomes_raw, str):
-                return json.loads(outcomes_raw)
-            elif isinstance(outcomes_raw, list):
-                return outcomes_raw
-            else:
-                return []
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.warning(f"Error parsing outcomes: {e}")
+            if isinstance(prices_json, str):
+                return json.loads(prices_json)
+            elif isinstance(prices_json, list):
+                return prices_json
+            return []
+        except (json.JSONDecodeError, TypeError):
             return []
 
     def _create_market_odds(
         self,
         market: dict,
-        outcome_index: int,
         outcome_name: str,
-        price: float,
+        probability: float,
         sport: Sport,
     ) -> Optional[MarketOdds]:
         """Create MarketOdds object from Polymarket market data."""
         try:
             market_id = market.get("id", "")
             market_slug = market.get("slug", "")
-            title = market.get("title", "")
+            question = market.get("question", "")
 
-            if not market_id or not title:
+            if not market_id or not question:
                 return None
 
-            # Convert price to probability (prices are already in 0-1 range)
-            probability = float(price)
+            # Validate probability is in valid range
             if probability <= 0 or probability >= 1:
                 return None
 
-            # Determine market type
-            title_lower = title.lower()
-            if "over" in title_lower or "under" in title_lower:
+            # Determine market type based on question
+            question_lower = question.lower()
+            if "over" in question_lower or "under" in question_lower:
                 market_type = MarketType.OVER_UNDER
             else:
                 market_type = MarketType.MONEYLINE
@@ -207,20 +173,20 @@ class PolymarketFetcher:
             american_odds = probability_to_american(probability)
             decimal_odds = probability_to_decimal(probability)
 
-            # Polymarket market URL
-            url = f"https://polymarket.com/market/{market_slug}" if market_slug else None
+            # Build URL
+            url = f"https://polymarket.com/event/{market_slug}" if market_slug else None
 
             return MarketOdds(
                 platform=Platform.POLYMARKET,
                 event_id=market_id,
-                event_name=title,
+                event_name=question,
                 sport=sport,
                 market_type=market_type,
                 selection=outcome_name,
                 probability=probability,
                 american_odds=american_odds,
                 decimal_odds=decimal_odds,
-                raw_price=float(price),
+                raw_price=probability,
                 timestamp=datetime.utcnow(),
                 url=url,
             )
@@ -235,30 +201,34 @@ class PolymarketFetcher:
         odds_list = []
 
         try:
-            # Get markets
-            markets = await self._fetch_markets(sport)
+            # Get all markets
+            markets = await self._fetch_all_markets()
 
             if not markets:
-                logger.warning(f"No Polymarket markets found for sport {sport}")
+                logger.warning("No Polymarket markets found")
                 return []
 
-            logger.info(f"Found {len(markets)} Polymarket markets for sport {sport}")
+            logger.info(f"Total markets fetched: {len(markets)}")
 
             # Process each market
             for market in markets:
                 try:
-                    title = market.get("title", "")
-                    description = market.get("description", "")
-                    tags = market.get("tags", [])
+                    question = market.get("question", "")
+                    outcomes_json = market.get("outcomes", "[]")
+                    prices_json = market.get("outcomePrices", "[]")
 
-                    # Detect sport from market
-                    detected_sport = detect_sport(title, description, tags)
+                    # Detect sport from question
+                    detected_sport = detect_sport(question)
                     if not detected_sport:
                         continue
 
+                    # Filter by requested sport if specified
+                    if sport and detected_sport != sport:
+                        continue
+
                     # Parse outcomes and prices
-                    outcomes = self._parse_outcomes(market)
-                    prices = self._parse_outcome_prices(market)
+                    outcomes = self._parse_outcomes(outcomes_json)
+                    prices = self._parse_prices(prices_json)
 
                     # Validate we have matching outcomes and prices
                     if not outcomes or not prices or len(outcomes) != len(prices):
@@ -268,41 +238,41 @@ class PolymarketFetcher:
                         )
                         continue
 
-                    # Create MarketOdds for each outcome
-                    for outcome_index, (outcome_name, price) in enumerate(zip(outcomes, prices)):
+                    # Process "Yes" outcome (first outcome at index 0)
+                    if len(prices) > 0:
                         try:
-                            # Skip if price is string and can't be converted
-                            try:
-                                price_float = float(price)
-                            except (ValueError, TypeError):
-                                logger.warning(f"Invalid price {price} for outcome {outcome_name}")
-                                continue
+                            price = float(prices[0])
+                            outcome_name = outcomes[0] if len(outcomes) > 0 else "Yes"
 
                             market_odds = self._create_market_odds(
                                 market=market,
-                                outcome_index=outcome_index,
                                 outcome_name=outcome_name,
-                                price=price_float,
+                                probability=price,
                                 sport=detected_sport,
                             )
 
                             if market_odds:
                                 odds_list.append(market_odds)
-                        except Exception as e:
-                            logger.error(f"Error processing outcome {outcome_name}: {e}")
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"Invalid price format: {e}")
                             continue
+
                 except Exception as e:
                     logger.error(f"Error processing market {market.get('id')}: {e}")
                     continue
+
         except Exception as e:
             logger.error(f"Unexpected error in fetch_odds: {e}")
 
-        logger.info(f"Fetched {len(odds_list)} odds from Polymarket")
+        logger.info(f"Fetched {len(odds_list)} Polymarket odds for sport {sport}")
         return odds_list
 
 
 async def fetch_polymarket_odds(sport: Optional[Sport] = None) -> list[MarketOdds]:
-    """Public function to fetch Polymarket odds.
+    """Fetch Polymarket prediction market odds.
+
+    Fetches up to 600 sports markets, filters by keyword matching in the question
+    field, and returns MarketOdds for the "Yes" outcome.
 
     Args:
         sport: Optional Sport enum value to filter by specific sport

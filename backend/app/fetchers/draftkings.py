@@ -1,29 +1,44 @@
-"""Fetcher for DraftKings sportsbook odds."""
+"""Fetcher for DraftKings sportsbook odds via The Odds API."""
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Optional
-from urllib.parse import urljoin
 
 import httpx
 
 from backend.app.config import settings
-from backend.app.models import MarketOdds, MarketType, Platform, Sport, american_to_probability, probability_to_decimal
+from backend.app.models import (
+    MarketOdds,
+    MarketType,
+    Platform,
+    Sport,
+    probability_to_american,
+    probability_to_decimal,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class DraftKingsFetcher:
-    """Fetcher for DraftKings sportsbook odds."""
+    """Fetcher for DraftKings sportsbook odds via The Odds API."""
 
     def __init__(self):
         """Initialize the DraftKings fetcher."""
-        self.base_url = settings.DRAFTKINGS_API_BASE
         self.timeout = settings.REQUEST_TIMEOUT
         self.user_agent = settings.USER_AGENT
         self._cache = {}
         self._cache_times = {}
-        self.sport_ids = settings.DK_SPORT_IDS
+        # Map Sport enum to The Odds API sport keys
+        self.sport_keys = {
+            Sport.NFL: "americanfootball_nfl",
+            Sport.NBA: "basketball_nba",
+            Sport.MLB: "baseball_mlb",
+            Sport.NHL: "icehockey_nhl",
+            Sport.EPL: "soccer_epl",
+        }
+        # API key from environment
+        self.api_key = os.getenv("ODDS_API_KEY")
 
     def _is_cache_valid(self, key: str) -> bool:
         """Check if cached data is still valid."""
@@ -43,14 +58,9 @@ class DraftKingsFetcher:
         self._cache[key] = data
         self._cache_times[key] = datetime.utcnow()
 
-    async def _fetch_json(self, endpoint: str, params: dict = None) -> Optional[dict]:
-        """Fetch JSON from DraftKings API."""
-        url = urljoin(self.base_url, endpoint)
-        headers = {
-            "User-Agent": self.user_agent,
-            "Accept": "application/json",
-            "Referer": "https://sportsbook-nash.draftkings.com/",
-        }
+    async def _fetch_json(self, url: str, params: dict = None) -> Optional[list]:
+        """Fetch JSON from The Odds API."""
+        headers = {"User-Agent": self.user_agent}
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -70,148 +80,79 @@ class DraftKingsFetcher:
             logger.error(f"Unexpected error fetching {url}: {e}")
             return None
 
-    async def _fetch_events(self, sport: Optional[Sport] = None) -> list[dict]:
-        """Fetch events from DraftKings API."""
-        cache_key = f"draftkings_events_{sport}"
+    async def _fetch_odds_for_sport(self, sport: Sport) -> list[dict]:
+        """Fetch odds from The Odds API for a specific sport."""
+        if not self.api_key:
+            logger.warning("ODDS_API_KEY not set, skipping DraftKings data via The Odds API")
+            return []
+
+        cache_key = f"draftkings_{sport.value}"
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
 
-        all_events = []
+        sport_key = self.sport_keys.get(sport)
+        if not sport_key:
+            logger.warning(f"No Odds API sport key for {sport}")
+            return []
 
-        try:
-            # Determine which sports to fetch
-            sports_to_fetch = [sport] if sport else list(self.sport_ids.keys())
+        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
+        params = {
+            "apiKey": self.api_key,
+            "regions": "us",
+            "markets": "h2h,totals",
+            "bookmakers": "draftkings,fanduel",
+        }
 
-            for sport_key in sports_to_fetch:
-                sport_id = self.sport_ids.get(sport_key)
-                if not sport_id:
-                    continue
+        events = await self._fetch_json(url, params=params)
 
-                try:
-                    # Try primary endpoint pattern
-                    endpoint = f"/events?sportId={sport_id}&format=json"
-                    data = await self._fetch_json(endpoint)
+        if not events:
+            logger.warning(f"No events from Odds API for {sport}")
+            return []
 
-                    if data and "events" in data:
-                        events = data.get("events", [])
-                        if events:
-                            all_events.extend(events)
-                            logger.info(f"Found {len(events)} DraftKings events for {sport_key}")
-                            continue
-
-                    # Try alternative endpoint if primary fails
-                    # This is a fallback pattern based on DK API structure
-                    endpoint = f"/eventgroups/{sport_id}"
-                    data = await self._fetch_json(endpoint)
-
-                    if data:
-                        # Extract events from eventgroups response
-                        if "events" in data:
-                            events = data.get("events", [])
-                            if events:
-                                all_events.extend(events)
-                                logger.info(f"Found {len(events)} DraftKings events for {sport_key} (alt endpoint)")
-                        elif "eventGroups" in data:
-                            # Some responses may have eventGroups instead
-                            for group in data.get("eventGroups", []):
-                                if "events" in group:
-                                    all_events.extend(group["events"])
-
-                except Exception as e:
-                    logger.warning(f"Error fetching DraftKings events for {sport_key}: {e}")
-                    continue
-
-        except Exception as e:
-            logger.error(f"Unexpected error fetching DraftKings events: {e}")
-
-        self._set_cache(cache_key, all_events)
-        return all_events
-
-    def _extract_odds(self, offering: dict) -> tuple[Optional[int], Optional[int]]:
-        """Extract American odds and decimal odds from DraftKings offering."""
-        try:
-            # DraftKings provides odds in multiple formats
-            odds_american = offering.get("oddsAmerican")
-            odds_decimal = offering.get("oddsDecimal")
-
-            return odds_american, odds_decimal
-        except Exception as e:
-            logger.warning(f"Error extracting odds: {e}")
-            return None, None
-
-    def _detect_market_type(self, outcome_name: str, offering_name: str = "") -> MarketType:
-        """Detect market type from outcome or offering names."""
-        combined = f"{outcome_name} {offering_name}".lower()
-
-        if "over" in combined or "under" in combined:
-            return MarketType.OVER_UNDER
-        else:
-            return MarketType.MONEYLINE
-
-    def _extract_moneyline_selection(self, outcome_name: str) -> str:
-        """Extract clean selection name for moneyline markets."""
-        # Remove common suffixes and clean up
-        name = outcome_name.replace(" Win", "").replace(" Victory", "").strip()
-        return name
-
-    def _extract_ou_selection(self, outcome_name: str, offering_name: str = "") -> str:
-        """Extract clean selection name for over/under markets."""
-        # Try to extract over/under and the total
-        combined = f"{offering_name} {outcome_name}".lower()
-
-        if "over" in combined:
-            # Extract the total line if present
-            parts = outcome_name.split()
-            if len(parts) > 0:
-                return f"Over {parts[-1]}" if parts[-1].replace(".", "").isdigit() else "Over"
-            return "Over"
-        elif "under" in combined:
-            parts = outcome_name.split()
-            if len(parts) > 0:
-                return f"Under {parts[-1]}" if parts[-1].replace(".", "").isdigit() else "Under"
-            return "Under"
-
-        return outcome_name
+        self._set_cache(cache_key, events)
+        logger.info(f"Fetched {len(events)} events for {sport} from Odds API")
+        return events
 
     def _create_market_odds(
         self,
         event: dict,
-        outcome: dict,
-        offering: dict,
-        sport: Sport,
-        american_odds: int,
+        home_team: str,
+        away_team: str,
+        outcome_name: str,
         decimal_odds: float,
+        sport: Sport,
     ) -> Optional[MarketOdds]:
-        """Create MarketOdds object from DraftKings market data."""
+        """Create MarketOdds object from The Odds API data."""
         try:
-            event_id = str(event.get("eventId", ""))
-            event_name = event.get("name", "")
-            outcome_name = outcome.get("name", "")
-            offering_name = offering.get("label", "")
+            event_id = event.get("id", "")
+            sport_key = event.get("sport_key", "")
 
-            if not event_id or not event_name:
+            if not event_id:
                 return None
 
-            # Detect market type
-            market_type = self._detect_market_type(outcome_name, offering_name)
-
-            # Determine selection
-            if market_type == MarketType.OVER_UNDER:
-                selection = self._extract_ou_selection(outcome_name, offering_name)
-            else:
-                selection = self._extract_moneyline_selection(outcome_name)
-
-            # Calculate probability from American odds
-            if american_odds:
-                probability = american_to_probability(american_odds)
-            elif decimal_odds:
-                probability = 1 / decimal_odds if decimal_odds > 0 else 0.5
-            else:
+            # Convert decimal odds to probability (1/decimal_odds)
+            if decimal_odds <= 0:
                 return None
 
-            # DraftKings event URL pattern
-            url = f"https://sportsbook-nash.draftkings.com/sports/{event_name.lower().replace(' ', '-')}"
+            probability = 1.0 / decimal_odds
+
+            # Validate probability
+            if probability <= 0 or probability >= 1:
+                return None
+
+            # Create event name
+            event_name = f"{home_team} vs {away_team}"
+
+            # Detect market type from outcome name
+            outcome_lower = outcome_name.lower()
+            if "over" in outcome_lower or "under" in outcome_lower:
+                market_type = MarketType.OVER_UNDER
+            else:
+                market_type = MarketType.MONEYLINE
+
+            american_odds = probability_to_american(probability)
+            decimal_odds_full = probability_to_decimal(probability)
 
             return MarketOdds(
                 platform=Platform.DRAFTKINGS,
@@ -219,126 +160,119 @@ class DraftKingsFetcher:
                 event_name=event_name,
                 sport=sport,
                 market_type=market_type,
-                selection=selection,
+                selection=outcome_name,
                 probability=probability,
-                american_odds=american_odds or 0,
-                decimal_odds=decimal_odds or probability_to_decimal(probability),
-                raw_price=None,
+                american_odds=american_odds,
+                decimal_odds=decimal_odds_full,
+                raw_price=decimal_odds,
                 timestamp=datetime.utcnow(),
-                url=url,
+                url=None,  # Odds API doesn't provide direct links
             )
         except Exception as e:
-            logger.error(f"Error creating MarketOdds from DraftKings data: {e}")
+            logger.error(f"Error creating MarketOdds: {e}")
             return None
 
-    def _sport_from_event_id(self, sport_id: int) -> Optional[Sport]:
-        """Get sport enum from DraftKings sport ID."""
-        for sport_key, dk_id in self.sport_ids.items():
-            if dk_id == sport_id:
-                return Sport(sport_key)
-        return None
-
     async def fetch_odds(self, sport: Optional[Sport] = None) -> list[MarketOdds]:
-        """Fetch odds from DraftKings for specified sport or all sports."""
-        logger.info(f"Fetching DraftKings odds for sport: {sport}")
+        """Fetch odds from The Odds API for DraftKings.
+
+        Requires ODDS_API_KEY environment variable. If not set, returns empty list.
+        """
+        if not self.api_key:
+            logger.warning(
+                "ODDS_API_KEY env var not set. Set it for DraftKings data "
+                "(free tier available at https://the-odds-api.com)"
+            )
+            return []
+
+        logger.info(f"Fetching DraftKings odds via Odds API for sport: {sport}")
 
         odds_list = []
 
         try:
-            # Get events
-            events = await self._fetch_events(sport)
+            # Determine which sports to fetch
+            sports_to_fetch = [sport] if sport else list(self.sport_keys.keys())
 
-            if not events:
-                logger.warning(f"No DraftKings events found for sport {sport}")
-                return []
-
-            logger.info(f"Found {len(events)} DraftKings events for sport {sport}")
-
-            # Process each event
-            for event in events:
+            for target_sport in sports_to_fetch:
                 try:
-                    event_id = event.get("eventId")
-                    if not event_id:
+                    # Fetch events for this sport
+                    events = await self._fetch_odds_for_sport(target_sport)
+
+                    if not events:
+                        logger.debug(f"No Odds API events for {target_sport}")
                         continue
 
-                    # Get offerings (markets) from the event
-                    offerings = event.get("offerings", [])
-                    if not offerings:
-                        continue
-
-                    # Process each offering (market)
-                    for offering in offerings:
+                    # Process each event
+                    for event in events:
                         try:
-                            outcomes = offering.get("outcomes", [])
-                            if not outcomes:
+                            home_team = event.get("home_team", "")
+                            away_team = event.get("away_team", "")
+                            bookmakers = event.get("bookmakers", [])
+
+                            if not bookmakers:
                                 continue
 
-                            # Process each outcome (side of the bet)
-                            for outcome in outcomes:
-                                try:
-                                    outcome_name = outcome.get("name")
-                                    if not outcome_name:
-                                        continue
-
-                                    # Extract odds
-                                    american_odds, decimal_odds = self._extract_odds(outcome)
-                                    if not american_odds and not decimal_odds:
-                                        continue
-
-                                    # Determine sport from event or use provided sport
-                                    event_sport = sport
-                                    if not event_sport:
-                                        # Try to infer from event name
-                                        event_name = event.get("name", "").lower()
-                                        for sport_key in self.sport_ids.keys():
-                                            if sport_key in event_name or Sport[sport_key.upper()].value in event_name:
-                                                event_sport = Sport(sport_key)
-                                                break
-
-                                    if not event_sport:
-                                        # Fallback to first available sport
-                                        event_sport = Sport.NFL
-
-                                    # Create market odds
-                                    market_odds = self._create_market_odds(
-                                        event=event,
-                                        outcome=outcome,
-                                        offering=offering,
-                                        sport=event_sport,
-                                        american_odds=american_odds,
-                                        decimal_odds=decimal_odds,
-                                    )
-
-                                    if market_odds:
-                                        odds_list.append(market_odds)
-
-                                except Exception as e:
-                                    logger.warning(f"Error processing DraftKings outcome: {e}")
+                            # Find DraftKings bookmaker
+                            for bookmaker in bookmakers:
+                                if bookmaker.get("key") != "draftkings":
                                     continue
 
+                                markets = bookmaker.get("markets", [])
+                                for market in markets:
+                                    market_key = market.get("key", "")
+                                    outcomes = market.get("outcomes", [])
+
+                                    for outcome in outcomes:
+                                        try:
+                                            outcome_name = outcome.get("name", "")
+                                            decimal_odds = outcome.get("price")
+
+                                            if not outcome_name or decimal_odds is None:
+                                                continue
+
+                                            decimal_odds = float(decimal_odds)
+
+                                            market_odds = self._create_market_odds(
+                                                event=event,
+                                                home_team=home_team,
+                                                away_team=away_team,
+                                                outcome_name=outcome_name,
+                                                decimal_odds=decimal_odds,
+                                                sport=target_sport,
+                                            )
+
+                                            if market_odds:
+                                                odds_list.append(market_odds)
+
+                                        except Exception as e:
+                                            logger.debug(f"Error processing outcome: {e}")
+                                            continue
+
                         except Exception as e:
-                            logger.warning(f"Error processing DraftKings offering: {e}")
+                            logger.debug(f"Error processing event: {e}")
                             continue
 
                 except Exception as e:
-                    logger.error(f"Error processing DraftKings event {event.get('eventId')}: {e}")
+                    logger.warning(f"Error fetching odds for {target_sport}: {e}")
                     continue
 
         except Exception as e:
             logger.error(f"Unexpected error in fetch_odds: {e}")
 
-        logger.info(f"Fetched {len(odds_list)} odds from DraftKings")
+        logger.info(f"Fetched {len(odds_list)} DraftKings odds via Odds API for sport {sport}")
         return odds_list
 
 
 async def fetch_draftkings_odds(sport: Optional[Sport] = None) -> list[MarketOdds]:
-    """Public function to fetch DraftKings odds.
+    """Fetch DraftKings sportsbook odds via The Odds API aggregator.
+
+    Requires ODDS_API_KEY environment variable to be set. If not available,
+    returns an empty list and logs a warning with setup instructions.
 
     Args:
         sport: Optional Sport enum value to filter by specific sport
 
     Returns:
-        List of MarketOdds objects from DraftKings sportsbook
+        List of MarketOdds objects from DraftKings via The Odds API
     """
     fetcher = DraftKingsFetcher()
     return await fetcher.fetch_odds(sport)

@@ -3,12 +3,18 @@ import json
 import logging
 from datetime import datetime
 from typing import Optional
-from urllib.parse import urljoin
 
 import httpx
 
 from backend.app.config import settings
-from backend.app.models import MarketOdds, MarketType, Platform, Sport, american_to_probability, probability_to_decimal
+from backend.app.models import (
+    MarketOdds,
+    MarketType,
+    Platform,
+    Sport,
+    american_to_probability,
+    probability_to_decimal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,18 +24,18 @@ class FanDuelFetcher:
 
     def __init__(self):
         """Initialize the FanDuel fetcher."""
-        self.base_url = settings.FANDUEL_API_BASE
+        self.base_url = "https://sbapi.nj.sportsbook.fanduel.com/api"
         self.timeout = settings.REQUEST_TIMEOUT
         self.user_agent = settings.USER_AGENT
         self._cache = {}
         self._cache_times = {}
-        # Map sports to FanDuel category identifiers
-        self.sport_categories = {
-            "nfl": "nfl",
-            "nba": "nba",
-            "mlb": "mlb",
-            "nhl": "nhl",
-            "epl": "soccer",  # FanDuel uses "soccer" for EPL
+        # Map sports to FanDuel custom page IDs
+        self.sport_pages = {
+            Sport.NFL: "nfl",
+            Sport.NBA: "nba",
+            Sport.MLB: "mlb",
+            Sport.NHL: "nhl",
+            Sport.EPL: "soccer",
         }
 
     def _is_cache_valid(self, key: str) -> bool:
@@ -50,9 +56,8 @@ class FanDuelFetcher:
         self._cache[key] = data
         self._cache_times[key] = datetime.utcnow()
 
-    async def _fetch_json(self, endpoint: str, params: dict = None) -> Optional[dict]:
+    async def _fetch_json(self, url: str, params: dict = None) -> Optional[dict]:
         """Fetch JSON from FanDuel API."""
-        url = urljoin(self.base_url, endpoint)
         headers = {
             "User-Agent": self.user_agent,
             "Accept": "application/json",
@@ -77,182 +82,144 @@ class FanDuelFetcher:
             logger.error(f"Unexpected error fetching {url}: {e}")
             return None
 
-    async def _fetch_events(self, sport: Optional[Sport] = None) -> list[dict]:
-        """Fetch events from FanDuel API."""
-        cache_key = f"fanduel_events_{sport}"
+    async def _fetch_markets_for_sport(self, sport: Sport) -> list[dict]:
+        """Fetch markets for a specific sport from FanDuel API."""
+        cache_key = f"fanduel_markets_{sport.value}"
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
 
-        all_events = []
+        markets = []
 
         try:
-            # Determine which sports to fetch
-            sports_to_fetch = []
-            if sport:
-                sport_key = sport.value.lower()
-                if sport_key in self.sport_categories:
-                    sports_to_fetch = [sport_key]
-            else:
-                sports_to_fetch = list(self.sport_categories.keys())
+            # Get the custom page ID for this sport
+            page_id = self.sport_pages.get(sport)
+            if not page_id:
+                logger.warning(f"No page ID found for sport {sport}")
+                return []
 
-            for sport_key in sports_to_fetch:
-                sport_category = self.sport_categories.get(sport_key)
-                if not sport_category:
-                    continue
+            # Fetch from CUSTOM endpoint with custom page ID
+            url = f"{self.base_url}/content-managed-page"
+            params = {
+                "page": "CUSTOM",
+                "customPageId": page_id,
+                "_ak": "FhMFpcPWXMeyZxOx",
+            }
 
-                try:
-                    # Primary endpoint pattern for FanDuel content-managed pages
-                    params = {
-                        "page": sport_category.upper(),
-                    }
-                    endpoint = "/content-managed-page"
-                    data = await self._fetch_json(endpoint, params=params)
+            data = await self._fetch_json(url, params=params)
 
-                    if data:
-                        events = []
-                        # FanDuel API structure: events may be in different response formats
-                        if "events" in data:
-                            events = data.get("events", [])
-                        elif "eventGroups" in data:
-                            # Alternative: events organized by groups
-                            for group in data.get("eventGroups", []):
-                                if "events" in group:
-                                    events.extend(group["events"])
-                        elif "competitions" in data:
-                            # Some sports may use competitions instead
-                            for comp in data.get("competitions", []):
-                                if "events" in comp:
-                                    events.extend(comp["events"])
+            if not data:
+                logger.warning(f"No data from FanDuel for sport {sport}")
+                return []
 
-                        if events:
-                            all_events.extend(events)
-                            logger.info(f"Found {len(events)} FanDuel events for {sport_key}")
-                            continue
+            # Extract events and markets from attachments
+            attachments = data.get("attachments", {})
+            if not attachments:
+                logger.warning(f"No attachments in FanDuel response for {sport}")
+                return []
 
-                    # Try alternative endpoint pattern
-                    endpoint = f"/v2/{sport_category}/events"
-                    data = await self._fetch_json(endpoint)
+            events_dict = attachments.get("events", {})
+            markets_dict = attachments.get("markets", {})
 
-                    if data and "events" in data:
-                        events = data.get("events", [])
-                        if events:
-                            all_events.extend(events)
-                            logger.info(f"Found {len(events)} FanDuel events for {sport_key} (alt endpoint)")
+            # Convert markets dict to list and enrich with event info
+            for market_id, market_data in markets_dict.items():
+                market_data["id"] = market_id
+                markets.append(market_data)
 
-                except Exception as e:
-                    logger.warning(f"Error fetching FanDuel events for {sport_key}: {e}")
-                    continue
+            logger.info(f"Found {len(markets)} markets for {sport}")
 
         except Exception as e:
-            logger.error(f"Unexpected error fetching FanDuel events: {e}")
+            logger.error(f"Error fetching FanDuel markets for {sport}: {e}")
 
-        self._set_cache(cache_key, all_events)
-        return all_events
+        self._set_cache(cache_key, markets)
+        return markets
 
     def _extract_odds(self, runner: dict) -> tuple[Optional[int], Optional[float]]:
-        """Extract American odds and decimal odds from FanDuel runner."""
+        """Extract American and decimal odds from FanDuel runner."""
         try:
-            # FanDuel provides odds in winRunnerOdds object
-            win_odds = runner.get("winRunnerOdds", {})
+            # Navigate the nested odds structure
+            win_runner_odds = runner.get("winRunnerOdds", {})
 
-            # Try American display odds first
-            odds_american = win_odds.get("americanDisplayOdds")
-            odds_decimal = win_odds.get("decimalOdds")
+            # American odds from americanDisplayOdds
+            american_display = win_runner_odds.get("americanDisplayOdds", {})
+            american_odds = american_display.get("americanOdds")
 
-            # Fallback to other possible field names
-            if not odds_american:
-                odds_american = runner.get("americanOdds")
-            if not odds_decimal:
-                odds_decimal = runner.get("decimalOdds")
+            # Decimal odds from decimalOdds
+            decimal_odds_obj = win_runner_odds.get("decimalOdds", {})
+            decimal_odds = decimal_odds_obj.get("decimalOdds")
 
-            return odds_american, odds_decimal
+            # Convert to proper types
+            if american_odds is not None:
+                american_odds = int(american_odds)
+            if decimal_odds is not None:
+                decimal_odds = float(decimal_odds)
+
+            return american_odds, decimal_odds
         except Exception as e:
             logger.warning(f"Error extracting odds from runner: {e}")
             return None, None
 
-    def _detect_market_type(self, market_name: str = "", runner_name: str = "") -> MarketType:
-        """Detect market type from market or runner names."""
-        combined = f"{market_name} {runner_name}".lower()
+    def _detect_market_type(self, market_name: str = "") -> MarketType:
+        """Detect market type from market name."""
+        market_lower = market_name.lower()
 
-        if "over" in combined or "under" in combined or "total" in combined:
+        if "over" in market_lower or "under" in market_lower or "total" in market_lower:
             return MarketType.OVER_UNDER
         else:
             return MarketType.MONEYLINE
 
-    def _extract_moneyline_selection(self, runner_name: str) -> str:
-        """Extract clean selection name for moneyline markets."""
-        # Remove common suffixes
-        name = runner_name.replace(" Win", "").replace(" Victory", "").strip()
-        return name
-
-    def _extract_ou_selection(self, runner_name: str, market_name: str = "") -> str:
-        """Extract clean selection name for over/under markets."""
-        combined = f"{market_name} {runner_name}".lower()
-
-        if "over" in combined:
-            # Try to extract the total line if present
-            parts = runner_name.split()
-            if len(parts) > 0 and parts[-1].replace(".", "").replace("-", "").isdigit():
-                return f"Over {parts[-1]}"
-            return "Over"
-        elif "under" in combined:
-            parts = runner_name.split()
-            if len(parts) > 0 and parts[-1].replace(".", "").replace("-", "").isdigit():
-                return f"Under {parts[-1]}"
-            return "Under"
-
-        return runner_name
-
     def _create_market_odds(
         self,
-        event: dict,
-        market: dict,
-        runner: dict,
+        event_id: str,
+        event_name: str,
+        runner_name: str,
+        market_name: str,
         sport: Sport,
-        american_odds: int,
-        decimal_odds: float,
+        american_odds: Optional[int],
+        decimal_odds: Optional[float],
     ) -> Optional[MarketOdds]:
         """Create MarketOdds object from FanDuel market data."""
         try:
-            event_id = str(event.get("eventId", "") or event.get("id", ""))
-            event_name = event.get("name", "")
-            runner_name = runner.get("name", "")
-            market_name = market.get("name", "")
-
             if not event_id or not event_name:
                 return None
 
-            # Detect market type
-            market_type = self._detect_market_type(market_name, runner_name)
-
-            # Determine selection
-            if market_type == MarketType.OVER_UNDER:
-                selection = self._extract_ou_selection(runner_name, market_name)
-            else:
-                selection = self._extract_moneyline_selection(runner_name)
-
-            # Calculate probability from American odds
+            # Calculate probability from available odds
             if american_odds:
                 probability = american_to_probability(american_odds)
-            elif decimal_odds:
-                probability = 1 / decimal_odds if decimal_odds > 0 else 0.5
+            elif decimal_odds and decimal_odds > 0:
+                probability = 1 / decimal_odds
             else:
                 return None
 
-            # FanDuel event URL pattern (may vary by sport)
+            # Ensure probability is valid
+            if probability <= 0 or probability >= 1:
+                return None
+
+            # Detect market type
+            market_type = self._detect_market_type(market_name)
+
+            # Use runner name as selection (team or over/under)
+            selection = runner_name.strip()
+
+            # Build URL
             url = f"https://nj.sportsbook.fanduel.com/event/{event_id}"
+
+            # Calculate American and decimal odds if not already present
+            if not american_odds:
+                american_odds = 0
+            if not decimal_odds:
+                decimal_odds = probability_to_decimal(probability)
 
             return MarketOdds(
                 platform=Platform.FANDUEL,
-                event_id=event_id,
+                event_id=str(event_id),
                 event_name=event_name,
                 sport=sport,
                 market_type=market_type,
                 selection=selection,
                 probability=probability,
-                american_odds=american_odds or 0,
-                decimal_odds=decimal_odds or probability_to_decimal(probability),
+                american_odds=american_odds,
+                decimal_odds=decimal_odds,
                 raw_price=None,
                 timestamp=datetime.utcnow(),
                 url=url,
@@ -261,25 +228,6 @@ class FanDuelFetcher:
             logger.error(f"Error creating MarketOdds from FanDuel data: {e}")
             return None
 
-    def _infer_sport(self, event_name: str, event_id: str = "") -> Sport:
-        """Infer sport from event name or ID."""
-        event_text = f"{event_name} {event_id}".lower()
-
-        # Check for each sport
-        if any(keyword in event_text for keyword in ["nfl", "football"]):
-            return Sport.NFL
-        elif any(keyword in event_text for keyword in ["nba", "basketball"]):
-            return Sport.NBA
-        elif any(keyword in event_text for keyword in ["mlb", "baseball"]):
-            return Sport.MLB
-        elif any(keyword in event_text for keyword in ["nhl", "hockey"]):
-            return Sport.NHL
-        elif any(keyword in event_text for keyword in ["epl", "premier league", "soccer", "football"]):
-            return Sport.EPL
-
-        # Default to NFL if cannot determine
-        return Sport.NFL
-
     async def fetch_odds(self, sport: Optional[Sport] = None) -> list[MarketOdds]:
         """Fetch odds from FanDuel for specified sport or all sports."""
         logger.info(f"Fetching FanDuel odds for sport: {sport}")
@@ -287,59 +235,78 @@ class FanDuelFetcher:
         odds_list = []
 
         try:
-            # Get events
-            events = await self._fetch_events(sport)
+            # Determine which sports to fetch
+            sports_to_fetch = [sport] if sport else list(self.sport_pages.keys())
 
-            if not events:
-                logger.warning(f"No FanDuel events found for sport {sport}")
-                return []
-
-            logger.info(f"Found {len(events)} FanDuel events for sport {sport}")
-
-            # Process each event
-            for event in events:
+            for target_sport in sports_to_fetch:
                 try:
-                    event_id = event.get("eventId") or event.get("id")
-                    if not event_id:
-                        continue
+                    # Fetch markets for this sport
+                    markets = await self._fetch_markets_for_sport(target_sport)
 
-                    event_name = event.get("name", "")
-                    if not event_name:
-                        continue
-
-                    # Get markets from the event
-                    markets = event.get("markets", [])
                     if not markets:
+                        logger.debug(f"No FanDuel markets found for {target_sport}")
                         continue
 
-                    # Process each market
+                    logger.info(f"Found {len(markets)} markets for {target_sport}")
+
+                    # Process each market — only OUTRIGHT WINNER markets
+                    # Polymarket has "Will X win the championship?" so we match
+                    # against FanDuel's championship/outright winner markets ONLY.
+                    # Exclude exact results, conference winners, player awards, etc.
+                    WINNER_KEYWORDS = [
+                        "finals winner", "championship", "champion",
+                        "stanley cup 2", "super bowl 2", "world series 2",
+                        "to win",
+                    ]
+                    EXCLUDE_KEYWORDS = [
+                        "exact result", "conference", "division",
+                        "first time", "first-time", "to make playoffs",
+                        "mvp", "trophy", "player of", "coach of",
+                        "rookie", "improved", "sixth man",
+                        "award", "pick", "draft", "advance to",
+                        "finalists", "matchup", "double chance",
+                        "state of", "winning league",
+                    ]
+
                     for market in markets:
                         try:
+                            market_id = market.get("id", "")
+                            market_name = market.get("marketName", "")
+                            event_id = market.get("eventId", "")
                             runners = market.get("runners", [])
-                            if not runners:
+
+                            if not market_id or not event_id or not runners:
                                 continue
 
-                            # Process each runner (side of the bet)
+                            # Filter: only keep outright winner markets
+                            market_lower = market_name.lower()
+                            is_winner = any(kw in market_lower for kw in WINNER_KEYWORDS)
+                            is_excluded = any(kw in market_lower for kw in EXCLUDE_KEYWORDS)
+                            if not is_winner or is_excluded:
+                                continue
+
+                            # Include market name in event_name for better matching context
+                            event_name = market_name or f"Event {event_id}"
+
+                            # Process each runner (team/side)
                             for runner in runners:
                                 try:
-                                    runner_name = runner.get("name")
+                                    runner_name = runner.get("runnerName", "")
                                     if not runner_name:
                                         continue
 
                                     # Extract odds
                                     american_odds, decimal_odds = self._extract_odds(runner)
-                                    if not american_odds and not decimal_odds:
+                                    if american_odds is None and decimal_odds is None:
                                         continue
-
-                                    # Determine sport
-                                    event_sport = sport or self._infer_sport(event_name, str(event_id))
 
                                     # Create market odds
                                     market_odds = self._create_market_odds(
-                                        event=event,
-                                        market=market,
-                                        runner=runner,
-                                        sport=event_sport,
+                                        event_id=event_id,
+                                        event_name=event_name,
+                                        runner_name=runner_name,
+                                        market_name=market_name,
+                                        sport=target_sport,
                                         american_odds=american_odds,
                                         decimal_odds=decimal_odds,
                                     )
@@ -348,26 +315,30 @@ class FanDuelFetcher:
                                         odds_list.append(market_odds)
 
                                 except Exception as e:
-                                    logger.warning(f"Error processing FanDuel runner: {e}")
+                                    logger.debug(f"Error processing FanDuel runner: {e}")
                                     continue
 
                         except Exception as e:
-                            logger.warning(f"Error processing FanDuel market: {e}")
+                            logger.debug(f"Error processing FanDuel market: {e}")
                             continue
 
                 except Exception as e:
-                    logger.error(f"Error processing FanDuel event {event.get('eventId')}: {e}")
+                    logger.warning(f"Error fetching FanDuel markets for {target_sport}: {e}")
                     continue
 
         except Exception as e:
             logger.error(f"Unexpected error in fetch_odds: {e}")
 
-        logger.info(f"Fetched {len(odds_list)} odds from FanDuel")
+        logger.info(f"Fetched {len(odds_list)} FanDuel odds for sport {sport}")
         return odds_list
 
 
 async def fetch_fanduel_odds(sport: Optional[Sport] = None) -> list[MarketOdds]:
-    """Public function to fetch FanDuel odds.
+    """Fetch FanDuel sportsbook odds.
+
+    Uses the content-managed page endpoint with custom page IDs for each sport.
+    Extracts markets with runners (teams) and converts American odds to
+    implied probability.
 
     Args:
         sport: Optional Sport enum value to filter by specific sport

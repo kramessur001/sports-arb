@@ -405,113 +405,117 @@ export default function App() {
           </div>
         )}
 
-        {/* Opportunities table */}
+        {/* Opportunities */}
         {filtered.length > 0 ? (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>Sport</th>
-                  <th style={styles.th}>Event</th>
-                  <th style={styles.th}>Prediction Mkt</th>
-                  <th style={styles.th}>Sportsbook</th>
-                  <th style={styles.th}>Edge</th>
-                  <th style={styles.th}>EV / $1</th>
-                  <th style={{ ...styles.th, minWidth: '300px' }}>Recommendation</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((opp, idx) => {
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {filtered.map((opp, idx) => {
                   const sc = SPORT_COLORS[opp.sport] || SPORT_COLORS.nfl
                   const ec = EDGE_COLORS[opp.category] || EDGE_COLORS.minimal
+                  const isPositive = opp.edge_percent > 0
                   return (
-                    <tr
+                    <div
                       key={opp.id + idx}
                       style={{
-                        background: idx % 2 === 0 ? 'transparent' : '#0d132108',
+                        background: '#111827',
+                        border: `1px solid ${isPositive ? '#16532940' : '#7f1d1d30'}`,
+                        borderLeft: `4px solid ${ec.color}`,
+                        borderRadius: '8px',
+                        padding: '16px 20px',
                       }}
-                      onMouseEnter={e => e.currentTarget.style.background = '#1e293b40'}
-                      onMouseLeave={e => e.currentTarget.style.background = idx % 2 === 0 ? 'transparent' : '#0d132108'}
                     >
-                      <td style={styles.td}>
-                        <span style={{
-                          ...styles.sportBadge,
-                          background: sc.bg,
-                          color: sc.color,
-                        }}>
-                          {opp.sport.toUpperCase()}
-                        </span>
-                      </td>
-                      <td style={styles.td}>
-                        <div style={{ fontWeight: 600, marginBottom: '2px' }}>
-                          {opp.event}
-                        </div>
-                        {opp.event_date && (
-                          <div style={{ color: '#64748b', fontSize: '12px' }}>
-                            {new Date(opp.event_date).toLocaleDateString()}
+                      {/* Top row: sport badge, event name, edge */}
+                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '12px', gap: '12px', flexWrap: 'wrap' }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                            <span style={{
+                              ...styles.sportBadge,
+                              background: sc.bg,
+                              color: sc.color,
+                            }}>
+                              {opp.sport.toUpperCase()}
+                            </span>
+                            <span style={{ fontSize: '15px', fontWeight: 700, color: '#f1f5f9' }}>
+                              {opp.event}
+                            </span>
                           </div>
-                        )}
-                      </td>
-                      <td style={styles.td}>
-                        <div style={{ fontWeight: 600 }}>
-                          {opp.prediction_market?.platform?.toUpperCase()}
+                          <div style={{ color: '#64748b', fontSize: '12px' }}>
+                            {opp.prediction_market?.raw_name}
+                          </div>
                         </div>
-                        <div style={{ color: '#94a3b8', fontSize: '13px' }}>
-                          {opp.prediction_market?.price_cents?.toFixed(0)}¢
-                          ({(opp.prediction_market?.probability * 100)?.toFixed(1)}%)
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0 }}>
+                          <span style={{
+                            ...styles.edgeBadge,
+                            background: ec.bg,
+                            color: ec.color,
+                            fontSize: '16px',
+                          }}>
+                            {opp.edge_percent > 0 ? '+' : ''}{opp.edge_percent.toFixed(1)}% edge
+                          </span>
+                          <span style={{
+                            color: opp.expected_value > 0 ? '#4ade80' : '#f87171',
+                            fontWeight: 700,
+                            fontSize: '14px',
+                          }}>
+                            {opp.expected_value > 0 ? '+' : ''}${opp.expected_value.toFixed(2)} EV/$1
+                          </span>
                         </div>
-                        {opp.prediction_market?.url && (
-                          <a href={opp.prediction_market.url} target="_blank" rel="noopener" style={styles.platformLink}>
-                            View →
-                          </a>
-                        )}
-                      </td>
-                      <td style={styles.td}>
-                        <div style={{ fontWeight: 600 }}>
-                          {opp.sportsbook?.platform?.toUpperCase()}
+                      </div>
+
+                      {/* Odds comparison row */}
+                      <div style={{ display: 'flex', gap: '16px', marginBottom: '14px', flexWrap: 'wrap' }}>
+                        <div style={{ background: '#0d1321', borderRadius: '6px', padding: '10px 14px', flex: 1, minWidth: '180px' }}>
+                          <div style={{ color: '#64748b', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+                            {opp.prediction_market?.platform?.toUpperCase()}
+                          </div>
+                          <div style={{ fontSize: '20px', fontWeight: 700, color: '#e2e8f0' }}>
+                            {opp.prediction_market?.price_cents?.toFixed(0)}¢
+                            <span style={{ fontSize: '14px', fontWeight: 400, color: '#94a3b8', marginLeft: '6px' }}>
+                              ({(opp.prediction_market?.probability * 100)?.toFixed(1)}% implied)
+                            </span>
+                          </div>
+                          {opp.prediction_market?.url && (
+                            <a href={opp.prediction_market.url} target="_blank" rel="noopener" style={{ ...styles.platformLink, marginTop: '4px', display: 'inline-block' }}>
+                              Open on {opp.prediction_market?.platform?.charAt(0).toUpperCase() + opp.prediction_market?.platform?.slice(1)} →
+                            </a>
+                          )}
                         </div>
-                        <div style={{ color: '#94a3b8', fontSize: '13px' }}>
-                          {opp.sportsbook?.american_odds > 0 ? '+' : ''}
-                          {opp.sportsbook?.american_odds}
-                          ({(opp.sportsbook?.probability * 100)?.toFixed(1)}%)
+                        <div style={{ display: 'flex', alignItems: 'center', color: '#475569', fontSize: '18px', padding: '0 4px' }}>vs</div>
+                        <div style={{ background: '#0d1321', borderRadius: '6px', padding: '10px 14px', flex: 1, minWidth: '180px' }}>
+                          <div style={{ color: '#64748b', fontSize: '11px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+                            {opp.sportsbook?.platform?.toUpperCase()} — {opp.sportsbook?.selection}
+                          </div>
+                          <div style={{ fontSize: '20px', fontWeight: 700, color: '#e2e8f0' }}>
+                            {opp.sportsbook?.american_odds > 0 ? '+' : ''}{opp.sportsbook?.american_odds}
+                            <span style={{ fontSize: '14px', fontWeight: 400, color: '#94a3b8', marginLeft: '6px' }}>
+                              ({(opp.sportsbook?.probability * 100)?.toFixed(1)}% implied)
+                            </span>
+                          </div>
+                          {opp.sportsbook?.url && (
+                            <a href={opp.sportsbook.url} target="_blank" rel="noopener" style={{ ...styles.platformLink, marginTop: '4px', display: 'inline-block' }}>
+                              Open on {opp.sportsbook?.platform?.charAt(0).toUpperCase() + opp.sportsbook?.platform?.slice(1)} →
+                            </a>
+                          )}
                         </div>
-                        {opp.sportsbook?.url && (
-                          <a href={opp.sportsbook.url} target="_blank" rel="noopener" style={styles.platformLink}>
-                            View →
-                          </a>
-                        )}
-                      </td>
-                      <td style={styles.td}>
-                        <span style={{
-                          ...styles.edgeBadge,
-                          background: ec.bg,
-                          color: ec.color,
-                        }}>
-                          {opp.edge_percent > 0 ? '+' : ''}{opp.edge_percent.toFixed(1)}%
+                      </div>
+
+                      {/* Recommendation — the main action */}
+                      <div style={{
+                        background: isPositive ? '#052e1620' : '#2d0a0a20',
+                        border: `1px solid ${isPositive ? '#16532930' : '#7f1d1d25'}`,
+                        borderRadius: '6px',
+                        padding: '12px 14px',
+                        fontSize: '13px',
+                        lineHeight: '1.5',
+                        color: '#cbd5e1',
+                      }}>
+                        <span style={{ fontWeight: 700, color: isPositive ? '#4ade80' : '#fbbf24', marginRight: '6px' }}>
+                          {isPositive ? 'ACTION — BUY YES:' : 'ACTION — BUY NO:'}
                         </span>
-                      </td>
-                      <td style={styles.td}>
-                        <span style={{
-                          color: opp.expected_value > 0 ? '#4ade80' : '#f87171',
-                          fontWeight: 600,
-                        }}>
-                          {opp.expected_value > 0 ? '+' : ''}
-                          ${opp.expected_value.toFixed(3)}
-                        </span>
-                      </td>
-                      <td style={styles.td}>
-                        <div style={styles.recommendation}>
-                          {opp.recommendation}
-                        </div>
-                        <div style={styles.confidence}>
-                          Match confidence: {(opp.match_confidence * 100).toFixed(0)}%
-                        </div>
-                      </td>
-                    </tr>
+                        {opp.recommendation}
+                      </div>
+                    </div>
                   )
                 })}
-              </tbody>
-            </table>
           </div>
         ) : (
           <div style={styles.emptyState}>

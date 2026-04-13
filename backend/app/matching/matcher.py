@@ -356,7 +356,9 @@ class EventMatcher:
                     used_sb_ids.add(sb_key)
 
                     match_id = generate_match_id(sport, best_team, "futures")
-                    normalized_name = f"{best_team.title()} — {sport.value.upper()}"
+                    # Build a descriptive event name from sportsbook market context
+                    sb_market = best_sb.event_name  # e.g. "Stanley Cup 2025-26 - Winner"
+                    normalized_name = f"{best_sb.selection} to Win {sb_market}"
 
                     matched = MatchedEvent(
                         match_id=match_id,

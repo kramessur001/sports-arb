@@ -76,7 +76,12 @@ def build_recommendation(
     pm_prob: float,
     sb_prob: float,
 ) -> str:
-    """Build a clear, actionable recommendation string."""
+    """
+    Build a crystal-clear, actionable recommendation.
+
+    The user should be able to read this and know EXACTLY what to do
+    on which platform without any ambiguity.
+    """
     pm = matched.prediction_market
     sb = matched.sportsbook
 
@@ -86,28 +91,39 @@ def build_recommendation(
     pm_platform = pm.platform.value.title()
     sb_platform = sb.platform.value.title()
 
-    if edge_percent > 0:
-        # Prediction market is underpriced → BUY
-        direction = "BUY"
-        action = f"BUY \"{pm.selection}\" on {pm_platform}"
-        price_info = f"at {pm_prob*100:.1f}¢"
-        compare = (
-            f"{sb_platform} implies {sb_prob*100:.1f}% "
-            f"(odds: {sb.american_odds:+d})"
-        )
-        edge_info = f"Edge: +{edge_percent:.1f}%"
-    else:
-        # Prediction market is overpriced → SELL / fade
-        direction = "SELL"
-        action = f"SELL / fade \"{pm.selection}\" on {pm_platform}"
-        price_info = f"at {pm_prob*100:.1f}¢"
-        compare = (
-            f"{sb_platform} implies only {sb_prob*100:.1f}% "
-            f"(odds: {sb.american_odds:+d})"
-        )
-        edge_info = f"Edge: {edge_percent:.1f}%"
+    # Build the specific bet description from the PM question
+    # e.g., "Will the Tampa Bay Lightning win the 2026 NHL Stanley Cup?"
+    pm_question = pm.event_name.rstrip("?").strip()
 
-    return f"{action} {price_info} — {compare}. {edge_info}"
+    # The sportsbook selection gives us the team name context
+    sb_team = sb.selection  # e.g., "Tampa Bay Lightning"
+    sb_market = sb.event_name  # e.g., "Stanley Cup 2025-26 - Winner"
+
+    if edge_percent > 0:
+        # Prediction market is UNDERPRICED → BUY YES
+        # Sportsbook thinks this is MORE likely than PM price
+        rec = (
+            f'Go to {pm_platform} and BUY "YES" on: '
+            f'"{pm_question}" — currently priced at {pm_prob*100:.1f}¢ '
+            f'(implied {pm_prob*100:.1f}% chance). '
+            f'{sb_platform} has {sb_team} at {sb.american_odds:+d} '
+            f'({sb_prob*100:.1f}% implied), '
+            f'meaning the market is underpricing this by {edge_percent:.1f}%.'
+        )
+    else:
+        # Prediction market is OVERPRICED → BUY NO (or SELL YES)
+        # Sportsbook thinks this is LESS likely than PM price
+        no_price = (1 - pm_prob) * 100
+        rec = (
+            f'Go to {pm_platform} and BUY "NO" on: '
+            f'"{pm_question}" — "NO" is currently priced at {no_price:.1f}¢ '
+            f'(the "YES" side at {pm_prob*100:.1f}¢ is overpriced). '
+            f'{sb_platform} has {sb_team} at {sb.american_odds:+d} '
+            f'({sb_prob*100:.1f}% implied), '
+            f'meaning the market is overpricing this by {abs(edge_percent):.1f}%.'
+        )
+
+    return rec
 
 
 class ArbitrageCalculator:

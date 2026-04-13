@@ -220,6 +220,7 @@ class FanDuelFetcher:
                 probability=probability,
                 american_odds=american_odds,
                 decimal_odds=decimal_odds,
+                bet_category="championship",  # FanDuel filtered to outright winner markets only
                 raw_price=None,
                 timestamp=datetime.utcnow(),
                 url=url,

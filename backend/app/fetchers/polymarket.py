@@ -29,6 +29,39 @@ SPORT_KEYWORDS = {
 }
 
 
+def _detect_bet_category(question_lower: str) -> str:
+    """Detect what kind of bet this is from the question text."""
+    championship_kw = [
+        "win the", "win nba", "win nfl", "win mlb", "win nhl",
+        "stanley cup", "super bowl", "world series", "finals",
+        "championship", "champion", "win the 202",
+    ]
+    position_kw = [
+        "finish in", "place in", "make playoffs", "make the playoffs",
+        "relegated", "promotion", "top 4", "top four",
+        "qualify for", "clinch", "seed",
+    ]
+    award_kw = [
+        "mvp", "rookie of", "defensive player", "most improved",
+        "ballon d'or", "golden boot", "cy young", "heisman",
+    ]
+    game_kw = [
+        "beat", "defeat", "vs", "versus", "game",
+        "win against", "win on",
+    ]
+
+    # Check award FIRST (most specific — "win NBA MVP" shouldn't match "win NBA")
+    if any(kw in question_lower for kw in award_kw):
+        return "award"
+    if any(kw in question_lower for kw in championship_kw):
+        return "championship"
+    if any(kw in question_lower for kw in position_kw):
+        return "position"
+    if any(kw in question_lower for kw in game_kw):
+        return "game"
+    return "other"
+
+
 def detect_sport(question: str) -> Optional[Sport]:
     """Detect sport from market question text using keyword matching."""
     question_lower = question.lower()
@@ -170,6 +203,9 @@ class PolymarketFetcher:
             else:
                 market_type = MarketType.MONEYLINE
 
+            # Categorize the bet type
+            bet_category = _detect_bet_category(question_lower)
+
             american_odds = probability_to_american(probability)
             decimal_odds = probability_to_decimal(probability)
 
@@ -186,6 +222,7 @@ class PolymarketFetcher:
                 probability=probability,
                 american_odds=american_odds,
                 decimal_odds=decimal_odds,
+                bet_category=bet_category,
                 raw_price=probability,
                 timestamp=datetime.utcnow(),
                 url=url,

@@ -18,6 +18,15 @@ class MarketType(str, Enum):
     OVER_UNDER = "over_under"
 
 
+class BetCategory(str, Enum):
+    """Distinguishes what KIND of bet this is, to prevent cross-matching."""
+    CHAMPIONSHIP = "championship"  # Win the title (NBA Finals, Stanley Cup, etc.)
+    GAME = "game"  # Win a specific game
+    POSITION = "position"  # Finish in Xth place, make playoffs, etc.
+    AWARD = "award"  # MVP, Rookie of Year, etc.
+    OTHER = "other"
+
+
 class Platform(str, Enum):
     KALSHI = "kalshi"
     POLYMARKET = "polymarket"
@@ -37,6 +46,7 @@ class MarketOdds:
     probability: float  # implied probability 0-1
     american_odds: int  # American odds format
     decimal_odds: float  # Decimal odds format
+    bet_category: str = "other"  # championship, game, position, award, other
     raw_price: Optional[float] = None  # raw price (e.g., Kalshi contract price)
     timestamp: datetime = field(default_factory=datetime.utcnow)
     url: Optional[str] = None  # link to the bet on the platform

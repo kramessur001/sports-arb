@@ -164,6 +164,7 @@ class DraftKingsFetcher:
                 probability=probability,
                 american_odds=american_odds,
                 decimal_odds=decimal_odds_full,
+                bet_category="game",  # Odds API returns game-level odds only
                 raw_price=decimal_odds,
                 timestamp=datetime.utcnow(),
                 url=None,  # Odds API doesn't provide direct links

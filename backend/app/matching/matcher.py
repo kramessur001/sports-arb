@@ -344,6 +344,18 @@ class EventMatcher:
                         if sb_key in used_sb_ids:
                             continue
 
+                        # CRITICAL: Only match if bet categories are compatible
+                        # This prevents game moneylines matching against
+                        # championship futures (e.g. Liverpool game vs Crystal
+                        # Palace league position bet)
+                        if pm.bet_category != sb.bet_category:
+                            logger.debug(
+                                f"Skipping category mismatch: "
+                                f"PM '{pm.selection}' ({pm.bet_category}) vs "
+                                f"SB '{sb.selection}' ({sb.bet_category})"
+                            )
+                            continue
+
                         # Compute confidence
                         confidence = self._compute_confidence(pm, sb, team)
                         if confidence > best_confidence:

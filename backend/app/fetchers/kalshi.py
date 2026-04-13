@@ -19,6 +19,38 @@ from backend.app.models import (
 logger = logging.getLogger(__name__)
 
 
+def _detect_bet_category(title: str) -> str:
+    """Detect bet category from Kalshi event/market title."""
+    title_lower = title.lower()
+    championship_kw = [
+        "win the", "champion", "stanley cup", "super bowl",
+        "world series", "finals", "win nba", "win nfl",
+        "win mlb", "win nhl",
+    ]
+    position_kw = [
+        "finish in", "place in", "make playoffs", "relegated",
+        "top 4", "qualify for", "seed",
+    ]
+    award_kw = [
+        "mvp", "rookie of", "defensive player", "most improved",
+        "cy young", "heisman",
+    ]
+    game_kw = [
+        "beat", "defeat", "vs", "versus", "game",
+        "win against", "win on",
+    ]
+    # Check award FIRST (most specific — "win NBA MVP" shouldn't match "win NBA")
+    if any(kw in title_lower for kw in award_kw):
+        return "award"
+    if any(kw in title_lower for kw in championship_kw):
+        return "championship"
+    if any(kw in title_lower for kw in position_kw):
+        return "position"
+    if any(kw in title_lower for kw in game_kw):
+        return "game"
+    return "other"
+
+
 # Sport detection keywords for Kalshi markets
 SPORT_KEYWORDS = {
     Sport.NFL: ["nfl", "football", "super bowl"],
@@ -194,6 +226,11 @@ class KalshiFetcher:
             # Build URL
             url = f"https://kalshi.com/markets/{market_ticker}"
 
+            # Detect bet category from event title + market title
+            bet_category = _detect_bet_category(
+                event_title + " " + market.get("title", "")
+            )
+
             return MarketOdds(
                 platform=Platform.KALSHI,
                 event_id=event_ticker,
@@ -204,6 +241,7 @@ class KalshiFetcher:
                 probability=probability,
                 american_odds=american_odds,
                 decimal_odds=decimal_odds,
+                bet_category=bet_category,
                 raw_price=probability,
                 timestamp=datetime.utcnow(),
                 url=url,
